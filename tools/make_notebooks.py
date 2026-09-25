@@ -10,7 +10,7 @@ os.makedirs(OUT, exist_ok=True)
 
 SETUP = r'''# @title Setup — clone repo (if needed), install deps, detect GPU
 import os, sys, subprocess, json, time, math
-REPO_URL = "https://github.com/YOUR_GITHUB_USER/reversible-llm-poc.git"   # <-- edit after you push
+REPO_URL = "https://github.com/swatibansal/reversible-llm-poc.git"
 
 if not os.path.exists("src/revllm.py"):
     if os.path.exists("../src/revllm.py"):
