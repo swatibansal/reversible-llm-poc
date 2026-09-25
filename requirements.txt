@@ -1,0 +1,6 @@
+torch>=2.1
+numpy
+tiktoken
+datasets
+matplotlib
+nbformat        # only for tools/make_notebooks.py

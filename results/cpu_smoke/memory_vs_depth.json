@@ -1,0 +1,44 @@
+{
+ "depths": [
+  2,
+  4,
+  8
+ ],
+ "saved_MB": {
+  "baseline": [
+   13.417484,
+   23.93806,
+   44.979212
+  ],
+  "midpoint/no-rev": [
+   13.417484,
+   23.93806,
+   44.979212
+  ],
+  "midpoint/rev": [
+   3.421196,
+   3.421196,
+   3.421196
+  ]
+ },
+ "peak_GB": {
+  "baseline": [
+   NaN,
+   NaN,
+   NaN
+  ],
+  "midpoint/no-rev": [
+   NaN,
+   NaN,
+   NaN
+  ],
+  "midpoint/rev": [
+   NaN,
+   NaN,
+   NaN
+  ]
+ },
+ "batch": 8,
+ "block": 64,
+ "device": "cpu"
+}
