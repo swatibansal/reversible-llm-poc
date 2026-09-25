@@ -33,6 +33,25 @@ print("device:", torch.cuda.get_device_name(0) if DEVICE == "cuda" else "cpu", "
 os.makedirs("results", exist_ok=True)
 '''
 
+DRIVE = r'''# @title Persist results/ and data/ to Google Drive (Colab only)
+# Surviving session resets matters twice here: results/*.json are the deliverable,
+# and the tokenized TinyStories memmaps take ~4 min to rebuild from scratch.
+try:
+    from google.colab import drive
+    IN_COLAB = True
+except ImportError:
+    IN_COLAB = False
+if IN_COLAB:
+    drive.mount("/content/drive")
+    for name in ("results", "data"):
+        target = f"/content/drive/MyDrive/revllm/{name}"
+        os.makedirs(target, exist_ok=True)
+        os.system(f"rm -rf {name} && ln -s {target} {name}")
+    print("results/ and data/ now live on Drive (MyDrive/revllm/)")
+else:
+    print("not running on Colab - keeping local results/ and data/")
+'''
+
 CONFIG = r'''# @title Experiment configuration (shared by all notebooks)
 if SMOKE:
     MODEL  = dict(vocab_size=512, block_size=64, n_layer=4, n_embd=128, n_head=4)
@@ -84,7 +103,7 @@ Before training anything, this notebook verifies the three claims that everythin
 3. **Activation memory is constant in depth** for reversible models and linear for the baseline (paper Fig. 3).
 
 We also measure the price: how much slower is one training step when activations are recomputed instead of stored?'''),
-("code", SETUP), ("code", CONFIG),
+("code", SETUP), ("code", DRIVE), ("code", CONFIG),
 ("md", "## 1 & 2 — exact inverse and identical gradients (all three reversible variants)"),
 ("code", r'''import copy
 torch.manual_seed(0)
@@ -176,7 +195,7 @@ Trains the standard (non-reversible) 20M-parameter GPT for 50M tokens of TinySto
 This is the reference point every other run is compared against. Expected time on a Colab T4: ~25–40 min.
 
 Results are written to `results/baseline_B32.json` (loss curve, tokens/s, peak memory, config).'''),
-("code", SETUP), ("code", CONFIG),
+("code", SETUP), ("code", DRIVE), ("code", CONFIG),
 ("code", r'''train_bin, val_bin = get_data()
 cfg = Config(mode="baseline", **MODEL)
 res, model = T.train(cfg, train_bin, val_bin, batch_size=BATCH, tokens_budget=TOKENS, lr=LR,
@@ -209,7 +228,7 @@ and the backward pass reconstructs activations instead of storing them.
 
 Each run takes roughly 1.3–1.6× the baseline time (recompute overhead). Results are saved after **each** variant, so if Colab
 disconnects you can restart with a shorter `VARIANTS` list. Expected time on T4: ~40–55 min per variant.'''),
-("code", SETUP), ("code", CONFIG),
+("code", SETUP), ("code", DRIVE), ("code", CONFIG),
 ("code", r'''VARIANTS = ["midpoint", "leapfrog", "hamiltonian"]     # remove entries here to resume a partial run
 H = {"midpoint": 0.5, "leapfrog": 1.0, "hamiltonian": 1.0}  # midpoint uses 2h -> 2h=1 matches the baseline's residual scale
 
@@ -266,7 +285,7 @@ GPUs are more efficient on bigger batches (Table 4). Here we:
 > One thing to know before reading the numbers: with only 20M parameters and a 50k-word vocabulary, the *output layer's logits*
 > (`batch × 256 × 50257` numbers) are a large share of memory — and reversibility does nothing about them. We use a chunked,
 > checkpointed LM head for **all** models (baseline included) so that this doesn't hide the effect of reversibility on the transformer stack.'''),
-("code", SETUP), ("code", CONFIG),
+("code", SETUP), ("code", DRIVE), ("code", CONFIG),
 ("md", "## 1 — maximum batch that fits"),
 ("code", r'''BEST = "midpoint"        # pick the variant that did best in notebook 02
 H = {"midpoint": 0.5, "leapfrog": 1.0, "hamiltonian": 1.0}
@@ -321,7 +340,7 @@ nb4 = [
 
 Reads every `results/*.json`, prints the summary table, saves `results/summary.md` and the comparison plots.
 Paste the table into the README's "Results" section.'''),
-("code", SETUP), ("code", CONFIG),
+("code", SETUP), ("code", DRIVE), ("code", CONFIG),
 ("code", r'''runs = []
 for f in sorted(os.listdir("results")):
     if not f.endswith(".json"): continue
