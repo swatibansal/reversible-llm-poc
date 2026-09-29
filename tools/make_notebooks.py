@@ -18,8 +18,12 @@ if not os.path.exists("src/revllm.py"):
     if os.path.exists("../src/revllm.py"):
         os.chdir("..")
     else:
-        subprocess.run(["git", "clone", "-q", REPO_URL, "reversible-llm-poc"], check=True)
+        if not os.path.isdir("reversible-llm-poc"):   # a restarted (not deleted) runtime keeps the old clone
+            subprocess.run(["git", "clone", "-q", REPO_URL, "reversible-llm-poc"], check=True)
         os.chdir("reversible-llm-poc")
+# reused Colab VM -> the clone may predate the latest fixes; ff-pull (no-op on a fresh clone, never runs locally)
+if os.path.isdir(".git") and os.getcwd().startswith("/content"):
+    subprocess.run(["git", "pull", "-q", "--ff-only"], check=False)
 sys.path.insert(0, os.path.abspath("src"))
 subprocess.run([sys.executable, "-m", "pip", "-q", "install", "tiktoken", "datasets", "matplotlib"], check=False)
 
@@ -31,8 +35,9 @@ import train as T
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 # SMOKE mode = tiny synthetic run that finishes in ~1 min on CPU. Auto-enabled when there is no GPU.
 SMOKE = os.environ.get("SMOKE", "0") == "1" or DEVICE == "cpu"
+_commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
 print("device:", torch.cuda.get_device_name(0) if DEVICE == "cuda" else "cpu", "| SMOKE mode:", SMOKE,
-      "| alloc conf:", os.environ.get("PYTORCH_CUDA_ALLOC_CONF"))
+      "| alloc conf:", os.environ.get("PYTORCH_CUDA_ALLOC_CONF"), "| repo commit:", _commit or "unknown")
 os.makedirs("results", exist_ok=True)
 '''
 
