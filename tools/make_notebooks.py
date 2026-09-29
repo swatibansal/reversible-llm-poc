@@ -109,7 +109,7 @@ def load_runs(results_dir="results"):
     return runs
 
 import matplotlib.pyplot as plt
-def plot_runs(results, key="curve", title="training loss", smooth=25):
+def plot_runs(results, key="curve", title="training loss", smooth=25, save=None):
     plt.figure(figsize=(8, 4.5))
     for r in results:
         c = r[key]
@@ -119,6 +119,7 @@ def plot_runs(results, key="curve", title="training loss", smooth=25):
             ys = [sum(ys[max(0, i - smooth):i + 1]) / len(ys[max(0, i - smooth):i + 1]) for i in range(len(ys))]
         plt.plot(xs, ys, label=f"{r['run_name']}  (final {ys[-1]:.3f})")
     plt.xlabel("tokens seen (M)"); plt.ylabel("cross-entropy (nats)"); plt.title(title); plt.legend(); plt.grid(alpha=.3)
+    if save: plt.savefig(save, dpi=120)   # must happen before show(): show() consumes the figure
     plt.show()
 '''
 
@@ -295,9 +296,8 @@ for f in sorted(os.listdir("results")):
 rows = [[r["run_name"], f"{r['final_train_loss']:.4f}", f"{r['final_val_loss']:.4f}", f"{r['tokens_per_s_steady']:,.0f}",
          f"{r['peak_mem_gb']:.2f}" if r["peak_mem_gb"] else "n/a", f"{r['wall_time_s']/60:.1f}"] for r in allres]
 gpu_table(rows, ["run", "train loss", "val loss", "tokens/s", "peak GB", "minutes"])
-plot_runs(allres, title=f"training loss @ batch {BATCH}")
-plot_runs(allres, key="val_curve", title=f"validation loss @ batch {BATCH}")
-plt.savefig("results/loss_curves_fixed_batch.png", dpi=120)'''),
+plot_runs(allres, title=f"training loss @ batch {BATCH}", save="results/loss_curves_fixed_batch.png")
+plot_runs(allres, key="val_curve", title=f"validation loss @ batch {BATCH}")'''),
 ]
 
 # ---------------------------------------------------------------- 03 max batch
@@ -410,9 +410,8 @@ if ALSO_BASELINE_MAX and DEVICE == "cuda":
 rows = [[r["run_name"], r["batch_size"], r["steps"], f"{r['final_train_loss']:.4f}", f"{r['final_val_loss']:.4f}",
          f"{r['tokens_per_s_steady']:,.0f}", f"{r['peak_mem_gb']:.2f}" if r["peak_mem_gb"] else "n/a", f"{r['wall_time_s']/60:.1f}", r["speed_source"]] for r in allres]
 gpu_table(rows, ["run", "batch", "steps", "train loss", "val loss", "tokens/s", "peak GB", "minutes", "speed/mem from"])
-plot_runs(allres, title="training loss — all runs (x axis = tokens, so batch sizes are comparable)")
-plot_runs(allres, key="val_curve", title="validation loss — all runs")
-plt.savefig("results/loss_curves_all.png", dpi=120)'''),
+plot_runs(allres, title="training loss — all runs (x axis = tokens, so batch sizes are comparable)", save="results/loss_curves_all.png")
+plot_runs(allres, key="val_curve", title="validation loss — all runs", save="results/val_curves_all.png")'''),
 ]
 
 # ---------------------------------------------------------------- 04 report
@@ -443,8 +442,8 @@ if os.path.exists("results/max_batch_probe.json"):
     hdr += [f"| {k} | {v['max_batch']} | {v['peak_gb']:.2f} |" for k, v in p["probe"].items()] + [""]
 md = "\n".join(hdr + lines)
 open("results/summary.md", "w").write(md); print(md)
-plot_runs(runs, title="training loss — all runs"); plt.savefig("results/loss_curves_all.png", dpi=120)
-plot_runs(runs, key="val_curve", title="validation loss — all runs"); plt.savefig("results/val_curves_all.png", dpi=120)'''),
+plot_runs(runs, title="training loss — all runs", save="results/loss_curves_all.png")
+plot_runs(runs, key="val_curve", title="validation loss — all runs", save="results/val_curves_all.png")'''),
 ("code", r'''# On Colab: download the results folder so you can commit it to the repo
 try:
     from google.colab import files
