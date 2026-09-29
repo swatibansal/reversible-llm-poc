@@ -31,7 +31,8 @@ import train as T
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 # SMOKE mode = tiny synthetic run that finishes in ~1 min on CPU. Auto-enabled when there is no GPU.
 SMOKE = os.environ.get("SMOKE", "0") == "1" or DEVICE == "cpu"
-print("device:", torch.cuda.get_device_name(0) if DEVICE == "cuda" else "cpu", "| SMOKE mode:", SMOKE)
+print("device:", torch.cuda.get_device_name(0) if DEVICE == "cuda" else "cpu", "| SMOKE mode:", SMOKE,
+      "| alloc conf:", os.environ.get("PYTORCH_CUDA_ALLOC_CONF"))
 os.makedirs("results", exist_ok=True)
 '''
 
@@ -304,6 +305,7 @@ GPUs are more efficient on bigger batches (Table 4). Here we:
 1. **Probe** the largest batch that survives a full forward+backward+optimizer step, for the baseline and for the reversible model
    (doubling, then binary search).
 2. **Train** the reversible model for the same 50M tokens at 75% of its max batch (headroom for fragmentation), with the learning rate scaled by √(B/32).
+   If memory left behind by earlier cells in this session still causes an OOM, the training cell drops the batch 20% and retries automatically.
 3. Compare loss / tokens-per-second / peak memory against the fixed-batch runs.
 
 > One thing to know before reading the numbers: with only 20M parameters and a 50k-word vocabulary, the *output layer's logits*
@@ -338,18 +340,25 @@ if todo:
 ("md", "## 1 — maximum batch that fits"),
 ("code", r'''BEST = "midpoint"        # pick the variant that did best in notebook 02
 H = {"midpoint": 0.5, "leapfrog": 1.0, "hamiltonian": 1.0}
+REPROBE = False          # the probe is cached in results/max_batch_probe.json (on Drive); set True to redo it
 probe = {}
 if DEVICE == "cuda":
-    for name, cfg in [("baseline", Config(mode="baseline", **MODEL)),
-                      (f"{BEST}/no-rev", Config(mode=BEST, h=H[BEST], rev_backprop=False, **MODEL)),
-                      (f"{BEST}/rev", Config(mode=BEST, h=H[BEST], rev_backprop=True, **MODEL))]:
-        print(name)
-        b, pk = T.find_max_batch(cfg, start=16)
-        probe[name] = {"max_batch": b, "peak_gb": pk}
+    import gc
+    if not REPROBE and os.path.exists("results/max_batch_probe.json"):
+        probe = json.load(open("results/max_batch_probe.json"))["probe"]
+        print("using cached probe from results/max_batch_probe.json (REPROBE = True to redo)")
+    else:
+        for name, cfg in [("baseline", Config(mode="baseline", **MODEL)),
+                          (f"{BEST}/no-rev", Config(mode=BEST, h=H[BEST], rev_backprop=False, **MODEL)),
+                          (f"{BEST}/rev", Config(mode=BEST, h=H[BEST], rev_backprop=True, **MODEL))]:
+            print(name)
+            gc.collect(); torch.cuda.empty_cache()
+            b, pk = T.find_max_batch(cfg, start=16)
+            probe[name] = {"max_batch": b, "peak_gb": pk}
+        json.dump({"gpu": torch.cuda.get_device_name(0), "total_gb": torch.cuda.get_device_properties(0).total_memory/1e9, "probe": probe},
+                  open("results/max_batch_probe.json", "w"), indent=1)
     gpu_table([[k, v["max_batch"], f"{v['peak_gb']:.2f}", f"{v['max_batch']/probe['baseline']['max_batch']:.1f}x"] for k, v in probe.items()],
               ["model", "max batch (x%d tokens)" % MODEL["block_size"], "peak GB at max", "vs baseline"])
-    json.dump({"gpu": torch.cuda.get_device_name(0), "total_gb": torch.cuda.get_device_properties(0).total_memory/1e9, "probe": probe},
-              open("results/max_batch_probe.json", "w"), indent=1)
     # The probe measures a clean process on random tokens; a real run adds the data pipeline, eval batches and
     # allocator fragmentation over thousands of steps. 25% headroom has been enough in practice; 10% was not.
     HEADROOM = 0.75
@@ -361,11 +370,27 @@ print("training batch for the max-batch run:", MAXB)'''),
 
 Fewer, bigger steps. LR is scaled by √(B/32) (square-root scaling rule) and capped at 3e-3.'''),
 ("code", r'''train_bin, val_bin = get_data()
-lr_big = min(LR * math.sqrt(MAXB / BATCH), 3e-3)
 cfg = Config(mode=BEST, h=H[BEST], rev_backprop=True, **MODEL)
-res_big, model = T.train(cfg, train_bin, val_bin, batch_size=MAXB, tokens_budget=TOKENS, lr=lr_big,
-                         out_json=f"results/{BEST}_maxbatch_B{MAXB}.json",
-                         eval_every=max(10, LOG["eval_every"] * BATCH // MAXB), eval_iters=LOG["eval_iters"], log_every=max(1, 50 * BATCH // MAXB))'''),
+# The probe passed at a bigger batch in a *clean* allocator state, but section 0 and the probe itself have
+# churned this process: some reserved memory is no longer reusable, so the first attempt can OOM on step 1.
+# That failure costs seconds — free what we can, drop the batch 20% and retry.
+import gc
+B_try = MAXB
+while True:
+    gc.collect()
+    if DEVICE == "cuda": torch.cuda.empty_cache()
+    try:
+        res_big, model = T.train(cfg, train_bin, val_bin, batch_size=B_try, tokens_budget=TOKENS,
+                                 lr=min(LR * math.sqrt(B_try / BATCH), 3e-3),
+                                 out_json=f"results/{BEST}_maxbatch_B{B_try}.json",
+                                 eval_every=max(10, LOG["eval_every"] * BATCH // B_try), eval_iters=LOG["eval_iters"],
+                                 log_every=max(1, 50 * BATCH // B_try))
+        break
+    except torch.cuda.OutOfMemoryError:
+        B_try = int(B_try * 0.8) // 8 * 8
+        assert B_try > BATCH, "OOM near the fixed batch size — something else holds the GPU; restart the runtime and re-run (probe is cached)"
+        print(f"OOM — retrying at batch {B_try}")
+MAXB = B_try'''),
 ("md", r'''### Optional: baseline at *its* max batch too (fair "each model at its own limit" comparison)
 Set `ALSO_BASELINE_MAX = True` to run it (another ~25–40 min on T4).'''),
 ("code", r'''ALSO_BASELINE_MAX = False
