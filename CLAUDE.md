@@ -17,7 +17,7 @@ src/train.py       train(cfg, train_bin, val_bin, batch_size, tokens_budget, ...
 src/data.py        prepare_tinystories(), prepare_synthetic(), TokenStream
 tools/make_notebooks.py   SOURCE OF TRUTH for notebooks/*.ipynb — edit this, then regenerate
 notebooks/00..04   generated; 00 sanity, 01 baseline B=32, 02 reversible variants B=32, 03 max-batch, 04 report
-results/           run outputs (*.json with loss curves, *.png, summary.md); results/cpu_smoke/ = verified CPU dry run
+results/           results/gpu/ = Colab T4 runs quoted in README §6; results/cpu_smoke/ = verified CPU dry run
 ```
 
 ## Rules
@@ -75,17 +75,18 @@ python tools/make_notebooks.py
 SMOKE=1 MPLBACKEND=Agg bash -c 'for nb in notebooks/0*.ipynb; do
   python -m nbconvert --to notebook --execute --ExecutePreprocessor.timeout=600 --output /tmp/exec_$(basename $nb) $nb || exit 1; done'
 
-# 4. after GPU runs: unzip results.zip from Colab into results/, then rebuild the summary table
+# 4. after GPU runs: unzip results.zip from Colab into results/gpu/, then rebuild the summary table
+#    (merge *_speed.json overrides like load_runs() does — see "Results provenance" below)
 SMOKE=0 python - <<'EOF'
 import json, os
-runs = [json.load(open(f"results/{f}")) for f in sorted(os.listdir("results")) if f.endswith(".json")]
-runs = [r for r in runs if "curve" in r and not r["run_name"].endswith("_short")]
+runs = [json.load(open(f"results/gpu/{f}")) for f in sorted(os.listdir("results/gpu")) if f.endswith(".json")]
+runs = [r for r in runs if "curve" in r and not r["run_name"].endswith("_short") and not r["run_name"].endswith("_speed")]
 print("| run | batch | steps | train loss | val loss | tokens/s | peak GB | min |\n|---|---|---|---|---|---|---|---|")
 for r in runs:
     print(f"| {r['run_name']} | {r['batch_size']} | {r['steps']} | {r['final_train_loss']:.4f} | {r['final_val_loss']:.4f} | "
           f"{r['tokens_per_s_steady']:,.0f} | {r['peak_mem_gb']:.2f} | {r['wall_time_s']/60:.1f} |")
-if os.path.exists("results/max_batch_probe.json"):
-    p = json.load(open("results/max_batch_probe.json")); print("\nmax batch:", {k: v["max_batch"] for k, v in p["probe"].items()})
+if os.path.exists("results/gpu/max_batch_probe.json"):
+    p = json.load(open("results/gpu/max_batch_probe.json")); print("\nmax batch:", {k: v["max_batch"] for k, v in p["probe"].items()})
 EOF
 ```
 

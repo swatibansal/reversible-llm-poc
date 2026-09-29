@@ -6,9 +6,9 @@ Google Colab notebooks that train a ~20M-parameter GPT for 50M tokens four diffe
 promises: **same quality, far less memory, bigger batches, higher throughput.**
 
 > **Status of the numbers in this README.** The code has been verified end-to-end on CPU (exact reversibility, identical
-> gradients, constant memory in depth, all four variants train stably — see [§5](#5-what-we-verified-on-cpu-before-spending-gpu-time)).
-> The 50M-token TinyStories runs need a GPU; the notebooks are ready to run on a free Colab T4, and notebook `04_report`
-> produces the table for [§6](#6-results-50m-tokens-on-gpu). Rows marked `⏳` are filled in from `results/*.json` after you run them.
+> gradients, constant memory in depth, all four variants train stably — see [§5](#5-what-we-verified-on-cpu-before-spending-gpu-time)),
+> and the 50M-token TinyStories runs have been completed on a free Colab T4 — see [§6](#6-results-50m-tokens-on-gpu).
+> Raw run data lives in `results/gpu/*.json`.
 
 ---
 
@@ -126,7 +126,7 @@ so **edit `REPO_URL` in that cell once you've pushed** (or skip it by uploading 
 | [`00_sanity_checks.ipynb`](notebooks/00_sanity_checks.ipynb) | exact inverse, identical gradients, memory-vs-depth plot, recompute overhead | ~3 min |
 | [`01_baseline_fixed_batch.ipynb`](notebooks/01_baseline_fixed_batch.ipynb) | baseline GPT, **batch 32**, 50M tokens → `results/baseline_B32.json` | ~30–40 min |
 | [`02_reversible_variants_fixed_batch.ipynb`](notebooks/02_reversible_variants_fixed_batch.ipynb) | midpoint / leapfrog / hamiltonian at the **same batch 32**, plus the stored-vs-recomputed equivalence check | ~45–55 min each |
-| [`03_reversible_max_batch.ipynb`](notebooks/03_reversible_max_batch.ipynb) | probe max batch for baseline & reversible; train reversible at ~90% of its max batch for 50M tokens | ~10 min probe + ~30–45 min |
+| [`03_reversible_max_batch.ipynb`](notebooks/03_reversible_max_batch.ipynb) | probe max batch for baseline & reversible; train reversible at 75% of its max batch for 50M tokens | ~10 min probe + ~30–45 min |
 | [`04_report.ipynb`](notebooks/04_report.ipynb) | collect every `results/*.json` into `results/summary.md` + plots | seconds |
 
 Practical notes:
@@ -186,40 +186,58 @@ it only got 48 optimizer steps instead of 195. That second point is the most imp
 
 ## 6. Results: 50M tokens on GPU
 
-> ⏳ **Fill in after running notebooks 01–04 on Colab.** `04_report.ipynb` writes exactly this table to `results/summary.md`; paste it here.
-> Commit the `results/*.json` and `.png` files too so the numbers are reproducible.
-
 **Setup:** NVIDIA T4 (15 GB), fp16 autocast, 20.8M params, TinyStories (GPT-2 BPE), 50M tokens per run, AdamW (β=0.9/0.95, wd 0.1),
-3% warmup + cosine to 10%, grad-clip 1.0, no dropout.
+3% warmup + cosine to 10%, grad-clip 1.0, no dropout. Raw data: `results/gpu/*.json`.
 
-### 6.1 Fixed batch = 32 × 256 tokens (≈6,100 steps)
+> **Provenance note.** The four long runs were executed by an earlier `train.py` that picked bf16 on the T4 — which the T4 only
+> *emulates*, ~5× slower. Emulation changes speed, not math: the **losses are valid**, but tokens/s and peak memory in those runs are
+> not. The speed/memory numbers below were therefore re-measured in 300-step fp16 runs of the identical configurations
+> (`results/gpu/*_speed.json`, produced by notebook 03 §0). The max-batch run was measured entirely in fp16, in one run.
 
-| run | final train loss | final val loss | tokens/s | peak GB | wall-clock |
-|---|---|---|---|---|---|
-| baseline_B32 | ⏳ | ⏳ | ⏳ | ⏳ | ⏳ |
-| midpoint_B32 (reversible) | ⏳ | ⏳ | ⏳ | ⏳ | ⏳ |
-| leapfrog_B32 (reversible) | ⏳ | ⏳ | ⏳ | ⏳ | ⏳ |
-| hamiltonian_B32 (reversible) | ⏳ | ⏳ | ⏳ | ⏳ | ⏳ |
+### 6.1 Fixed batch = 32 × 256 tokens (6,103 steps)
 
-*Which variant worked best:* ⏳ (from the CPU smoke run: Hamiltonian > Leapfrog > Midpoint ≈ Baseline; the GPU run decides.)
+| run | final train loss | final val loss | tokens/s* | peak GB* |
+|---|---|---|---|---|
+| baseline_B32 | **1.8766** | **1.9611** | 35,331 | 4.43 |
+| midpoint_B32 (reversible) | 1.9052 | 1.9830 | 29,878 | 4.43 |
+| leapfrog_B32 (reversible) | 1.8929 | 1.9774 | 29,140 | 4.43 |
+| hamiltonian_B32 (reversible) | 1.9150 | 2.0019 | 30,312 | 4.43 |
+
+\* speed/memory from the fp16 re-measurement runs (see provenance note above).
+
+*Which variant worked best:* the **baseline** had the lowest val loss overall (1.961); among the reversible variants, **leapfrog**
+(1.977) beat midpoint (1.983) and Hamiltonian (2.002). All three reversible variants land within 0.02–0.04 nats of the baseline —
+the paper's "comparable quality" claim holds at this scale. Note this *reverses* the CPU-toy ranking (§5), where Hamiltonian was best.
+
+![gpu loss curves](results/gpu/loss_curves_all.png)
 
 ### 6.2 Maximum batch that fits (T4, 15 GB)
 
 | model | max batch | peak GB at max | vs baseline |
 |---|---|---|---|
-| baseline | ⏳ | ⏳ | 1.0× |
-| midpoint (stored activations) | ⏳ | ⏳ | ⏳ |
-| midpoint (**reversible**) | ⏳ | ⏳ | ⏳ |
+| baseline | 496 | 14.81 | 1.0× |
+| midpoint (stored activations) | 512 | 15.20 | 1.0× |
+| midpoint (**reversible**) | **2560** | 14.80 | **5.2×** |
+
+Reversible backprop fits **5.2× the batch** of both the baseline and the same architecture with stored activations. (The paper's
+Table 3 shows ~10× for GPT-2-scale models; at 20M params the chunked-but-unavoidable LM head and optimizer state occupy a larger
+fraction of the card, capping the ratio — see finding 2 in §7.)
 
 ### 6.3 Reversible at max batch, same 50M tokens
 
+Trained at batch 1920 = 75% of the probed max (headroom for allocator fragmentation; see COLAB_GUIDE troubleshooting).
+
 | run | batch | steps | final train loss | final val loss | tokens/s | peak GB | wall-clock |
 |---|---|---|---|---|---|---|---|
-| midpoint_maxbatch_B⏳ | ⏳ | ⏳ | ⏳ | ⏳ | ⏳ | ⏳ | ⏳ |
+| midpoint_maxbatch_B1920 | 1920 | 101 | 4.9837 | 4.9872 | 29,366 | 11.19 | 28.6 min |
 
-Expected shape of the result, based on the paper and the CPU dry run: tokens/s **up** (paper: +20% at 16 layers), peak memory near the
-card's limit by construction, and final loss **worse** than the batch-32 run because 50M tokens at a huge batch is far fewer optimizer
-steps. Throughput and sample-efficiency pull in opposite directions; the paper's Table 4 measures only the first.
+Two headline observations, both predicted in §7 before the run:
+
+* **Throughput did not improve** (29.4k tok/s at B=1920 vs 29.9k at B=32). A 20M-param model at batch 32 × 256 already saturates a
+  T4, so the freed memory buys nothing here — the paper's +21…+101% gains come from 16–96-layer models where the small-batch regime
+  under-uses the GPU.
+* **Loss is far worse at the same token budget** (val 4.99 vs 1.98): 101 optimizer steps instead of 6,103, and √-scaled LR (capped
+  at 3e-3) can't compensate. The curve was still descending at 50M tokens — big batches need more tokens, not just more speed.
 
 ## 7. Findings and gotchas
 
@@ -233,23 +251,28 @@ the logits for *both* baseline and reversible, and the paper's 10× disappears. 
 per-layer activation than our model — but it's the first thing you hit at POC scale. Deeper/wider models make the effect larger; a big
 vocabulary on a tiny model makes it smaller.
 
-**3. Recompute overhead is real: +67–70% on CPU, expected +30–50% on GPU.** At a *fixed* batch size the reversible model is strictly
-slower per token. The win only appears when you *use* the freed memory for a bigger batch — and only if the GPU wasn't already saturated
-at the small batch. On a T4 with a 20M model, batch 32 × 256 = 8k tokens/step probably already keeps the GPU fairly busy, so the
-throughput gain will be modest (the paper's 16-layer row shows +21%; their +101% is at 96 layers).
+**3. Recompute overhead is real, but smaller on GPU than the paper's estimate: measured +17–21% step time on T4** (fp16, batch 32:
+baseline 35.3k tok/s vs 29.1–30.3k for the reversible variants), against +67–70% on CPU and the paper's +30–50% estimate. At a *fixed*
+batch size the reversible model is strictly slower per token. The win only appears when you *use* the freed memory for a bigger batch —
+and only if the GPU wasn't already saturated at the small batch. Measured on the T4: it *was* already saturated — the 5.2×-batch run
+(§6.3) delivered **no throughput gain at all** (29.4k vs 29.9k tok/s). The paper's 16-layer row shows +21% and their +101% is at 96
+layers; a 10-layer, 20M-param model is below the regime where the trade pays off.
 
-**4. Big batch ≠ better model for the same tokens.** Our 4×-batch smoke run got 4× fewer optimizer steps and a far worse loss. At scale
-you'd counter this with a higher learning rate (we use √-scaling), more tokens, or a batch-size warmup schedule. "Same tokens, bigger
-batch, faster" is a throughput claim, not a quality claim — read Table 4 of the paper with that in mind.
+**4. Big batch ≠ better model for the same tokens.** Confirmed hard on GPU: the 60×-batch run (§6.3) got 101 optimizer steps instead
+of 6,103 and finished at val 4.99 vs 1.98 — not diverged, just badly undertrained, with the loss still falling at the 50M-token cutoff.
+√-scaled LR (capped at 3e-3) doesn't come close to compensating. At scale you'd counter this with more tokens or a batch-size warmup
+schedule. "Same tokens, bigger batch, faster" is a throughput claim, not a quality claim — read Table 4 of the paper with that in mind.
 
 **5. The three schemes behave differently at initialization.** Midpoint with `2h = 1` matches the baseline's residual scale exactly;
 leapfrog with `h = 1` has an accumulating "velocity" term (`2p₍l₎ − p₍l-1₎`) so hidden-state norms grow roughly quadratically with depth
 before LayerNorm tames them; Hamiltonian splits attention and MLP onto two streams, so each stream sees half the updates. At 10 layers all
 three are stable with GPT-2 init; at 50+ layers you would want to think about `h`.
 
-**6. Variant ranking at toy scale: Hamiltonian > Leapfrog > Midpoint ≈ Baseline.** Consistent with the paper's finding that leapfrog is
-"more stable" and with the intuition that second-order schemes propagate information further. Whether this survives at 20M/50M tokens is
-what notebook 02 answers.
+**6. The variant ranking did not survive the scale-up.** CPU toy scale (0.9M params, 200k tokens) said Hamiltonian > Leapfrog >
+Midpoint ≈ Baseline; the 20M/50M GPU runs say **Baseline (val 1.961) > Leapfrog (1.977) > Midpoint (1.983) > Hamiltonian (2.002)** —
+Hamiltonian went from best to worst. The spread is small (0.04 nats end to end, single seed per run), so the honest summary is:
+all three reversible schemes are *comparable* to the baseline, exactly as the paper claims, and toy-scale rankings within that band
+are noise you shouldn't extrapolate from.
 
 **7. Things we did not do.** No retrofit/conversion of a pre-trained model (§4 of the paper); no stochastic midpoint-θ (eq. 3.6); no
 downstream benchmarks (PIQA etc. are meaningless for a 20M TinyStories model); single seed per run.
@@ -312,7 +335,7 @@ reversible-llm-poc/
 ├── tools/make_notebooks.py   # notebooks are generated from this (diff-friendly source of truth)
 └── results/
     ├── cpu_smoke/            # executed CPU smoke results + plots + executed 00 notebook
-    └── *.json / *.png        # <- your GPU runs land here
+    └── gpu/                  # the Colab T4 runs quoted in §6 (long-run JSONs, *_speed.json re-measurements, plots)
 ```
 
 ## 10. Publishing this repo to GitHub

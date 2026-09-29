@@ -1,0 +1,18 @@
+{
+ "gpu": "Tesla T4",
+ "total_gb": 15.637086208,
+ "probe": {
+  "baseline": {
+   "max_batch": 496,
+   "peak_gb": 14.812619264
+  },
+  "midpoint/no-rev": {
+   "max_batch": 512,
+   "peak_gb": 15.199576576
+  },
+  "midpoint/rev": {
+   "max_batch": 2560,
+   "peak_gb": 14.803724288
+  }
+ }
+}
