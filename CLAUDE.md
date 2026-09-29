@@ -109,6 +109,14 @@ branch). Update README §3 "The 20M model" and the notebook time estimates in §
 **"The user's Colab run diverged (loss nan)."** `train()` stops on non-finite loss and still writes JSON. Lower `LR`, or for
 `leapfrog` lower `h` (0.7), or for `midpoint` set `h=0.25`. Note the change in README §7 finding 5.
 
+## Results provenance: `*_speed.json`
+
+Early GPU runs used bf16 on a T4 (emulated, ~5x slow), so their tokens/s is wrong while their losses are fine. Notebook 03
+section 0 re-measures speed/memory for such runs in short fp16 runs saved as `results/<run>_speed.json`; the shared
+`load_runs()` helper (defined in the notebooks' CONFIG cell) overrides `tokens_per_s_*`, `step_time_s`, `peak_mem_*` from
+the `_speed` file and sets `speed_source`. When filling the README, keep the "speed/mem measured in" column or footnote —
+never present a re-measured number as if it came from the long run.
+
 ## Things that look wrong but are intentional
 
 - `MidpointLayer.forward` returns `(x2, ...)` — the pair is `(p_{l-1}, p_l)` shifting by one; `trunk()` outputs `y2` for

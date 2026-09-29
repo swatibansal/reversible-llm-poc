@@ -25,7 +25,8 @@ def _amp(device):
     # T4 has no bf16 tensor cores -> fp16 + GradScaler. Ampere+ -> bf16 (no scaler needed).
     if device != "cuda":
         return nullcontext(), None, torch.float32
-    if torch.cuda.is_bf16_supported():
+    # NOTE: torch.cuda.is_bf16_supported() returns True on a T4 (emulated, ~5x slower). Use real tensor-core support.
+    if torch.cuda.get_device_capability(0)[0] >= 8:
         return torch.autocast("cuda", dtype=torch.bfloat16), None, torch.bfloat16
     return torch.autocast("cuda", dtype=torch.float16), torch.cuda.amp.GradScaler(), torch.float16
 
@@ -146,7 +147,7 @@ def _try_batch(cfg: Config, b: int, device: str):
         model = GPT(cfg).to(device)
         opt = torch.optim.AdamW(model.parameters(), lr=1e-4, fused=True)
         x = torch.randint(0, cfg.vocab_size, (b, cfg.block_size), device=device)
-        for _ in range(2):
+        for _ in range(3):  # 3 steps: step 2+ include optimizer state that step 1 does not
             with ctx:
                 loss = model(x, x)
             (scaler.scale(loss) if scaler else loss).backward()

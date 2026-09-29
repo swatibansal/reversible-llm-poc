@@ -79,7 +79,10 @@ You need: a GitHub account, a Google account, and Claude Code installed locally 
 | First cell says `SMOKE mode: True` | You didn't select the T4 runtime (step 7). Change it and **Runtime → Restart and run all**. |
 | `git clone` fails in first cell | `REPO_URL` still says `YOUR_GITHUB_USER` (step 5), or the repo is private. Alternatively upload the `src/` folder via the file sidebar and re-run. |
 | "Cannot connect to GPU backend" | Free-tier GPU quota exhausted for the day. Wait, or Runtime → Change runtime type → CPU to at least run SMOKE mode. |
+| `CUDA out of memory` in notebook 03 during training (probe passed) | The probe is a clean process; real training fragments memory. Notebooks now train at 75% of the probed max (`HEADROOM`) with `expandable_segments`. If it still OOMs, set `HEADROOM = 0.6` in the probe cell and re-run that cell + the training cell (no need to re-probe: `MAXB` is recomputed from `probe`). |
 | `CUDA out of memory` in notebook 01/02 | Shouldn't happen at batch 32 on 15 GB; if it does, another process holds the GPU — Runtime → Disconnect and delete runtime, retry. |
+| Your 01/02 result JSONs say `"dtype": "torch.bfloat16"` | Losses are fine; tokens/s is ~5× too low (T4 emulates bf16). Don't rerun 01/02: notebook 03 section 0 detects this and re-measures speed/memory in fp16 with 300-step runs (`results/<run>_speed.json`); notebook 04 merges them and footnotes it. |
+| First cell reports `dtype=torch.bfloat16` on a T4, and tokens/s is < 15k | Old `train.py`: T4 only *emulates* bf16 (5× slower). `git pull` — the fix picks fp16 on pre-Ampere GPUs. |
 | Loss becomes `nan` | `train()` stops and still saves the JSON. Lower `LR` (e.g. 3e-4) or `H["leapfrog"] = 0.7`, re-run that variant. Note it in README §7 finding 5. |
 | Notebook 03 max-batch probe takes forever | It's binary-searching; ~10 probes × ~30 s. Leave it. |
 | `datasets` download stalls | HF Hub hiccup. Re-run the cell; tokenization resumes from scratch but is only ~4 min. |
