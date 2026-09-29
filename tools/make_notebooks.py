@@ -10,6 +10,8 @@ os.makedirs(OUT, exist_ok=True)
 
 SETUP = r'''# @title Setup — clone repo (if needed), install deps, detect GPU
 import os, sys, subprocess, json, time, math
+# must be set BEFORE torch initialises CUDA: lets the allocator grow segments instead of fragmenting
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 REPO_URL = "https://github.com/swatibansal/reversible-llm-poc.git"
 
 if not os.path.exists("src/revllm.py"):
@@ -77,6 +79,28 @@ def gpu_table(rows, headers):
     line = lambda r: "| " + " | ".join(str(c).ljust(w[i]) for i, c in enumerate(r)) + " |"
     print(line(headers)); print("|" + "|".join("-" * (x + 2) for x in w) + "|")
     for r in rows: print(line(r))
+
+# T4 guard: the fixed train.py picks fp16 on pre-Ampere GPUs. If you see bfloat16 here, `src/` is stale (re-clone / git pull).
+if DEVICE == "cuda":
+    _dt = T._amp(DEVICE)[2]; _cap = torch.cuda.get_device_capability(0)[0]
+    print("autocast dtype:", _dt, "| compute capability:", _cap)
+    assert not (_cap < 8 and _dt == torch.bfloat16), "bf16 on a pre-Ampere GPU = emulated & ~5x slow. Update src/train.py (git pull) and restart the runtime."
+
+def load_runs(results_dir="results"):
+    """All long runs, with speed/memory fields overridden from a matching *_speed.json (fp16 re-measurement) when present."""
+    files = {f[:-5]: json.load(open(f"{results_dir}/{f}")) for f in sorted(os.listdir(results_dir)) if f.endswith(".json")}
+    runs = []
+    for name, r in files.items():
+        if "curve" not in r or name.endswith("_short") or name.endswith("_speed"): continue
+        sp = files.get(name + "_speed")
+        r = dict(r); r["speed_source"] = "same run"
+        if sp:
+            for k in ("tokens_per_s_steady", "tokens_per_s_overall", "step_time_s", "peak_mem_gb", "peak_mem_reserved_gb"):
+                r[k] = sp[k]
+            r["speed_source"] = f"{sp['steps']}-step {sp['dtype'].replace('torch.', '')} re-run"
+            r["dtype_loss"] = r["dtype"]; r["dtype"] = sp["dtype"]
+        runs.append(r)
+    return runs
 
 import matplotlib.pyplot as plt
 def plot_runs(results, key="curve", title="training loss", smooth=25):
@@ -279,13 +303,38 @@ GPUs are more efficient on bigger batches (Table 4). Here we:
 
 1. **Probe** the largest batch that survives a full forward+backward+optimizer step, for the baseline and for the reversible model
    (doubling, then binary search).
-2. **Train** the reversible model for the same 50M tokens at (≈90% of) its max batch, with the learning rate scaled by √(B/32).
+2. **Train** the reversible model for the same 50M tokens at 75% of its max batch (headroom for fragmentation), with the learning rate scaled by √(B/32).
 3. Compare loss / tokens-per-second / peak memory against the fixed-batch runs.
 
 > One thing to know before reading the numbers: with only 20M parameters and a 50k-word vocabulary, the *output layer's logits*
 > (`batch × 256 × 50257` numbers) are a large share of memory — and reversibility does nothing about them. We use a chunked,
 > checkpointed LM head for **all** models (baseline included) so that this doesn't hide the effect of reversibility on the transformer stack.'''),
 ("code", SETUP), ("code", DRIVE), ("code", CONFIG),
+("md", r'''## 0 — (only if needed) re-measure speed & memory in fp16
+
+If your notebook-01/02 results were produced by an older `train.py` on a T4, their JSON says `"dtype": "torch.bfloat16"`.
+A T4 has no bf16 hardware — PyTorch *emulates* it, ~5× slower — so those tokens/s numbers are wrong, though the **losses are fine**.
+This cell detects that case and re-runs each affected configuration for 300 steps in fp16, saving `results/<run>_speed.json`.
+Notebook 04 (and the table at the end of this notebook) then take loss from the long run and speed/memory from the re-run.
+Skip automatically if nothing needs fixing. ~2 min per configuration.'''),
+("code", r'''H = {"midpoint": 0.5, "leapfrog": 1.0, "hamiltonian": 1.0}
+SPEED_STEPS = 300 if not SMOKE else 30
+FORCE_SPEED_REMEASURE = False        # set True to re-measure every *_B{BATCH}.json regardless of dtype
+todo = []
+for f in sorted(os.listdir("results")):
+    if f.endswith(f"_B{BATCH}.json"):
+        r = json.load(open("results/" + f))
+        stale = r.get("dtype") == "torch.bfloat16" and DEVICE == "cuda" and torch.cuda.get_device_capability(0)[0] < 8
+        if (stale or FORCE_SPEED_REMEASURE) and not os.path.exists(f"results/{f[:-5]}_speed.json"):
+            todo.append((f[:-5], r["config"]))
+print("speed re-measure needed for:", [t[0] for t in todo] or "nothing")
+if todo:
+    train_bin, val_bin = get_data()
+    for name, c in todo:
+        cfg = Config(**c)
+        T.train(cfg, train_bin, val_bin, batch_size=BATCH, tokens_budget=SPEED_STEPS * BATCH * MODEL["block_size"], lr=LR,
+                out_json=f"results/{name}_speed.json", run_name=f"{name}_speed", eval_every=10**9, eval_iters=1, log_every=100)
+        if DEVICE == "cuda": torch.cuda.empty_cache()'''),
 ("md", "## 1 — maximum batch that fits"),
 ("code", r'''BEST = "midpoint"        # pick the variant that did best in notebook 02
 H = {"midpoint": 0.5, "leapfrog": 1.0, "hamiltonian": 1.0}
@@ -301,7 +350,10 @@ if DEVICE == "cuda":
               ["model", "max batch (x%d tokens)" % MODEL["block_size"], "peak GB at max", "vs baseline"])
     json.dump({"gpu": torch.cuda.get_device_name(0), "total_gb": torch.cuda.get_device_properties(0).total_memory/1e9, "probe": probe},
               open("results/max_batch_probe.json", "w"), indent=1)
-    MAXB = int(probe[f"{BEST}/rev"]["max_batch"] * 0.9) // 8 * 8      # 10% headroom for fragmentation
+    # The probe measures a clean process on random tokens; a real run adds the data pipeline, eval batches and
+    # allocator fragmentation over thousands of steps. 25% headroom has been enough in practice; 10% was not.
+    HEADROOM = 0.75
+    MAXB = int(probe[f"{BEST}/rev"]["max_batch"] * HEADROOM) // 8 * 8
 else:
     print("no GPU — SMOKE: pretending max batch is 64"); MAXB = 64
 print("training batch for the max-batch run:", MAXB)'''),
@@ -318,17 +370,16 @@ res_big, model = T.train(cfg, train_bin, val_bin, batch_size=MAXB, tokens_budget
 Set `ALSO_BASELINE_MAX = True` to run it (another ~25–40 min on T4).'''),
 ("code", r'''ALSO_BASELINE_MAX = False
 if ALSO_BASELINE_MAX and DEVICE == "cuda":
-    Bb = int(probe["baseline"]["max_batch"] * 0.9) // 8 * 8
+    Bb = int(probe["baseline"]["max_batch"] * HEADROOM) // 8 * 8
     cfgb = Config(mode="baseline", **MODEL)
     T.train(cfgb, train_bin, val_bin, batch_size=Bb, tokens_budget=TOKENS, lr=min(LR * math.sqrt(Bb / BATCH), 3e-3),
             out_json=f"results/baseline_maxbatch_B{Bb}.json",
             eval_every=max(10, LOG["eval_every"] * BATCH // Bb), eval_iters=LOG["eval_iters"], log_every=max(1, 50 * BATCH // Bb))'''),
 ("md", "## 3 — everything side by side"),
-("code", r'''allres = [json.load(open("results/" + f)) for f in sorted(os.listdir("results")) if f.endswith(".json")]
-allres = [r for r in allres if "curve" in r and not r["run_name"].endswith("_short")]
+("code", r'''allres = load_runs()
 rows = [[r["run_name"], r["batch_size"], r["steps"], f"{r['final_train_loss']:.4f}", f"{r['final_val_loss']:.4f}",
-         f"{r['tokens_per_s_steady']:,.0f}", f"{r['peak_mem_gb']:.2f}" if r["peak_mem_gb"] else "n/a", f"{r['wall_time_s']/60:.1f}"] for r in allres]
-gpu_table(rows, ["run", "batch", "steps", "train loss", "val loss", "tokens/s", "peak GB", "minutes"])
+         f"{r['tokens_per_s_steady']:,.0f}", f"{r['peak_mem_gb']:.2f}" if r["peak_mem_gb"] else "n/a", f"{r['wall_time_s']/60:.1f}", r["speed_source"]] for r in allres]
+gpu_table(rows, ["run", "batch", "steps", "train loss", "val loss", "tokens/s", "peak GB", "minutes", "speed/mem from"])
 plot_runs(allres, title="training loss — all runs (x axis = tokens, so batch sizes are comparable)")
 plot_runs(allres, key="val_curve", title="validation loss — all runs")
 plt.savefig("results/loss_curves_all.png", dpi=120)'''),
@@ -341,20 +392,21 @@ nb4 = [
 Reads every `results/*.json`, prints the summary table, saves `results/summary.md` and the comparison plots.
 Paste the table into the README's "Results" section.'''),
 ("code", SETUP), ("code", DRIVE), ("code", CONFIG),
-("code", r'''runs = []
-for f in sorted(os.listdir("results")):
-    if not f.endswith(".json"): continue
-    r = json.load(open("results/" + f))
-    if "curve" in r and not r["run_name"].endswith("_short"): runs.append(r)
-lines = ["| run | mode | rev backprop | batch | steps | final train loss | final val loss | tokens/s | peak GB | minutes |", "|---|---|---|---|---|---|---|---|---|---|"]
+("code", r'''runs = load_runs()
+lines = ["| run | mode | rev backprop | batch | steps | final train loss | final val loss | tokens/s | peak GB | minutes | speed/mem measured in |",
+         "|---|---|---|---|---|---|---|---|---|---|---|"]
 for r in runs:
     c = r["config"]
+    pk = f"{r['peak_mem_gb']:.2f}" if r["peak_mem_gb"] else "n/a"
     lines.append(f"| {r['run_name']} | {c['mode']} | {'yes' if c['mode']!='baseline' and c['rev_backprop'] else 'no'} | {r['batch_size']} | {r['steps']} | "
-                 f"{r['final_train_loss']:.4f} | {r['final_val_loss']:.4f} | {r['tokens_per_s_steady']:,.0f} | "
-                 f"{r['peak_mem_gb']:.2f} | {r['wall_time_s']/60:.1f} |" if r["peak_mem_gb"] else
-                 f"| {r['run_name']} | {c['mode']} | {'yes' if c['mode']!='baseline' and c['rev_backprop'] else 'no'} | {r['batch_size']} | {r['steps']} | "
-                 f"{r['final_train_loss']:.4f} | {r['final_val_loss']:.4f} | {r['tokens_per_s_steady']:,.0f} | n/a | {r['wall_time_s']/60:.1f} |")
-hdr = [f"**GPU:** {runs[0]['gpu']}  **dtype:** {runs[0]['dtype']}  **params:** {runs[0]['n_params']/1e6:.2f}M  **tokens/run:** {runs[0]['tokens_seen']/1e6:.0f}M", ""] if runs else []
+                 f"{r['final_train_loss']:.4f} | {r['final_val_loss']:.4f} | {r['tokens_per_s_steady']:,.0f} | {pk} | {r['wall_time_s']/60:.1f} | {r['speed_source']} |")
+hdr = []
+if runs:
+    hdr = [f"**GPU:** {runs[0]['gpu']}  **params:** {runs[0]['n_params']/1e6:.2f}M  **tokens/run:** {runs[0]['tokens_seen']/1e6:.0f}M  "
+           f"**autocast dtype:** {runs[0]['dtype']}", ""]
+    if any(r["speed_source"] != "same run" for r in runs):
+        hdr += ["> Note: rows marked *re-run* had their loss measured in a long bf16-emulated run (loss is unaffected) and their "
+                "tokens/s + peak memory re-measured in a short fp16 run of the identical configuration, because a T4 only emulates bf16.", ""]
 if os.path.exists("results/max_batch_probe.json"):
     p = json.load(open("results/max_batch_probe.json"))
     hdr += ["**Max batch probe** (%s, %.0f GB):" % (p["gpu"], p["total_gb"]), "", "| model | max batch | peak GB |", "|---|---|---|"]
